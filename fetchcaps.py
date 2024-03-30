@@ -60,6 +60,30 @@ def fetch_timed_captions(video_id, startTime, endTime):
   except Exception as e:
       print('[ERROR] error while getting transcriptions for ' + video_id + '. Reason: '+str(e.__str__()))
 
+def process_video(video_id, df_final, df_lock, counter_lock, processed_count, remaining_count):
+    sponsorTimes_video = sponsorTimes.loc[sponsorTimes['videoID'] == video_id]
+    startTime = sponsorTimes_video['startTime'].sort_values()
+    endTime = sponsorTimes_video['endTime'].sort_values()
+
+    timed_captions = fetch_timed_captions(video_id, startTime, endTime)
+    if timed_captions:
+        new_df = pd.DataFrame(timed_captions)
+        # Use lock to ensure thread-safe DataFrame update
+        with df_lock:
+            df_final = pd.concat([df_final, new_df], ignore_index=True)
+            df_final.to_csv("captions1.csv", mode='a', index=False, header=False)
+
+        # Update the processed and remaining counts
+        with counter_lock:
+            processed_count.value += 1
+            remaining_count.value = len(videoList) - processed_count.value
+
+        print('[INFO] retrieved captions for ' + video_id + ', elapsed: ' + str(processed_count.value) +
+              ', left: ' + str(remaining_count.value))
+
+    return df_final
+
+start = time.time()
 
 # read video URIs and sponsor spot time stamps from the CSVs
 videosList = pd.read_csv("videoList.csv")
@@ -68,28 +92,24 @@ videoList = videosList['videoID'].tolist()
 
 # init empty df for sponsored and non-sponsored captions
 df_final = pd.DataFrame()
+n = 0
 
-videoCount = 0
+# thread-safety stuff
+df_lock = threading.Lock()
+counter_lock = threading.Lock()
 
-for i in videoList:
-    video_id = i
+# counters
+processed_count = multiprocessing.Value('i', 0)
+remaining_count = multiprocessing.Value('i', len(videoList))
 
-    # find all sponsor spot time stamps for this video URI
-    sponsorTimes_video = sponsorTimes.loc[sponsorTimes['videoID'] == video_id]
+with ThreadPoolExecutor() as executor:
+    threads = [
+        executor.submit(process_video, vid, df_final.copy(), df_lock, counter_lock, processed_count, remaining_count)
+        for vid in videoList]
 
-    # sort by times in ascending order 
-    startTime = sponsorTimes_video['startTime'].sort_values()
-    endTime = sponsorTimes_video['endTime'].sort_values()
+    for thread in threads:
+        df_final = thread.result()
 
-
-    timed_captions = fetch_timed_captions(video_id, startTime, endTime)
-    
-    videoCount = videoCount + 1
-
-    if timed_captions:
-        df_int = pd.DataFrame(timed_captions)
-        print('[INFO] retrieved captions for ' + video_id +', elapsed: ' + str(videoCount) +', left: ' + str(len(videoList) - videoCount))
-
-        # append this video's data to the final DataFrame 
-        df_final = pd.concat([df_final, df_int], ignore_index=True)
-        df_final.to_csv("captions.csv", mode='a', index=False, header=False)
+print("\n\n\n-------------------------------------------------")
+print('runtime in seconds='+str(time.time()-start))
+print("-------------------------------------------------")
